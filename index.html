@@ -88,6 +88,10 @@
     position: relative;
   }
   .timer-card.break-mode { border-color: var(--good); }
+  .timer-card.long-break-mode { border-color: var(--accent-2); }
+  .timer-card.long-break-mode .timer-mode,
+  .timer-card.long-break-mode .session-label { color: var(--accent-2); }
+  .timer-card.long-break-mode .timer-display { color: var(--accent-2); }
   .timer-mode {
     font-size: 13px;
     text-transform: uppercase;
@@ -356,14 +360,21 @@
         <div class="settings-field">
           <label>Focus duration</label>
           <div class="settings-field-row">
-            <input type="number" id="focusMin" min="1" max="120" value="25" />
+            <input type="number" id="focusMin" min="1" max="120" value="40" />
             <span>min</span>
           </div>
         </div>
         <div class="settings-field">
-          <label>Break duration</label>
+          <label>Short break</label>
           <div class="settings-field-row">
-            <input type="number" id="breakMin" min="1" max="60" value="5" />
+            <input type="number" id="breakMin" min="1" max="60" value="10" />
+            <span>min</span>
+          </div>
+        </div>
+        <div class="settings-field">
+          <label>Long break <span style="color:var(--accent-2)">(every 4)</span></label>
+          <div class="settings-field-row">
+            <input type="number" id="longBreakMin" min="1" max="120" value="20" />
             <span>min</span>
           </div>
         </div>
@@ -375,6 +386,7 @@
       </div>
 
       <button class="settings-apply" id="applySettings">Apply</button>
+      <button id="testNotifBtn" style="margin-top:8px;background:transparent;border-color:var(--muted);color:var(--muted);padding:8px 18px;">🔔 Test notification</button>
     </div>
   </section>
 
@@ -405,9 +417,10 @@
   function saveState() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        focusSecs: FOCUS_SECS, breakSecs: BREAK_SECS, ringtone: selectedRingtone,
+        focusSecs: FOCUS_SECS, breakSecs: BREAK_SECS, longBreakSecs: LONG_BREAK_SECS,
+        ringtone: selectedRingtone,
         pomodoroCount, totalPomodoros, streak, lastPomodoroDate,
-        isBreak, sessionElapsed,
+        isBreak, isLongBreak, sessionElapsed,
         endTimestamp: running ? Date.now() + remaining * 1000 : null,
         tasks, nextId,
       }));
@@ -452,35 +465,16 @@
 
   function updateFavicon() {
     if (!running && !isBreak) {
-      // Idle — dim ring, no progress
-      drawFavicon({
-        progress: 0,
-        ringColor: '#414868',
-        trackColor: '#2f334d',
-        bgColor: '#1a1b26',
-        dot: { r: 6, color: '#414868' }
-      });
+      drawFavicon({ progress: 0, ringColor: '#414868', trackColor: '#2f334d', bgColor: '#1a1b26', dot: { r: 6, color: '#414868' } });
+    } else if (isBreak && isLongBreak) {
+      const total = LONG_BREAK_SECS, elapsed = total - remaining;
+      drawFavicon({ progress: elapsed / total, ringColor: '#bb9af7', trackColor: '#2a1f3a', bgColor: '#1a1b26', dot: { r: 6, color: '#bb9af7' } });
     } else if (isBreak) {
-      const total = BREAK_SECS;
-      const elapsed = total - remaining;
-      drawFavicon({
-        progress: elapsed / total,
-        ringColor: '#9ece6a',
-        trackColor: '#2a3a2a',
-        bgColor: '#1a1b26',
-        dot: { r: 6, color: '#9ece6a' }
-      });
+      const total = BREAK_SECS, elapsed = total - remaining;
+      drawFavicon({ progress: elapsed / total, ringColor: '#9ece6a', trackColor: '#2a3a2a', bgColor: '#1a1b26', dot: { r: 6, color: '#9ece6a' } });
     } else {
-      // Focus
-      const total = FOCUS_SECS;
-      const elapsed = total - remaining;
-      drawFavicon({
-        progress: elapsed / total,
-        ringColor: running ? '#7aa2f7' : '#4a5a8a',
-        trackColor: '#1e2a4a',
-        bgColor: '#1a1b26',
-        dot: { r: 6, color: running ? '#7aa2f7' : '#414868' }
-      });
+      const total = FOCUS_SECS, elapsed = total - remaining;
+      drawFavicon({ progress: elapsed / total, ringColor: running ? '#7aa2f7' : '#4a5a8a', trackColor: '#1e2a4a', bgColor: '#1a1b26', dot: { r: 6, color: running ? '#7aa2f7' : '#414868' } });
     }
   }
 
@@ -562,19 +556,39 @@
 
   let selectedRingtone = 'classic';
 
+  // Single shared AudioContext — created and unlocked on first user gesture
+  let sharedAudioCtx = null;
+  function getAudioCtx() {
+    if (!sharedAudioCtx) {
+      sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume();
+    return sharedAudioCtx;
+  }
+  // Unlock on first click anywhere so alarm works even without a gesture at fire time
+  document.addEventListener('click', () => { try { getAudioCtx(); } catch(e) {} }, { once: true });
+
   function playAlarm() {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      RINGTONES[selectedRingtone].play(ctx);
-    } catch(e) {}
+    try { RINGTONES[selectedRingtone].play(getAudioCtx()); } catch(e) {}
   }
 
   function previewRingtone(key) {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      RINGTONES[key].play(ctx);
-    } catch(e) {}
+    try { RINGTONES[key].play(getAudioCtx()); } catch(e) {}
   }
+
+  // ── Notifications ────────────────────────────────────────
+  function requestNotifPermission() {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }
+  function sendNotification(title, body) {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, { body, icon: '' });
+    }
+  }
+  // Ask on load (browser will only show prompt once)
+  requestNotifPermission();
 
   // Build ringtone buttons
   const ringtoneOptions = document.getElementById('ringtoneOptions');
@@ -630,29 +644,34 @@
         (i < pomodoroCount ? ' done' : i === pomodoroCount ? ' active' : '');
       sessionDots.appendChild(dot);
     }
-    sessionLabel.textContent = isBreak ? `Break ${pomodoroCount - 1}` : `Pomodoro ${pomodoroCount}`;
+    sessionLabel.textContent = isBreak
+      ? (isLongBreak ? `Long Break` : `Break ${pomodoroCount - 1}`)
+      : `Pomodoro ${pomodoroCount}`;
     streakBadge.textContent  = streak > 0 ? `🔥 ${streak}d streak` : '';
   }
 
   // ── Timer state ─────────────────────────────────────────
-  let FOCUS_SECS = 25 * 60;
-  let BREAK_SECS = 5 * 60;
-  let remaining  = FOCUS_SECS;
-  let intervalId = null;
-  let running    = false;
-  let isBreak    = false;
-  let sessionElapsed = 0;
+  let FOCUS_SECS      = 40 * 60;
+  let BREAK_SECS      = 10 * 60;
+  let LONG_BREAK_SECS = 20 * 60;
+  let remaining       = FOCUS_SECS;
+  let intervalId      = null;
+  let running         = false;
+  let isBreak         = false;
+  let isLongBreak     = false;
+  let sessionElapsed  = 0;
 
-  const display       = document.getElementById('display');
-  const startBtn      = document.getElementById('startBtn');
-  const finishBtn     = document.getElementById('finishBtn');
-  const modeEl        = document.getElementById('mode');
-  const timerCard     = document.getElementById('timerCard');
-  const settingsToggle= document.getElementById('settingsToggle');
-  const settingsPanel = document.getElementById('settingsPanel');
-  const focusMinInput = document.getElementById('focusMin');
-  const breakMinInput = document.getElementById('breakMin');
-  const applyBtn      = document.getElementById('applySettings');
+  const display          = document.getElementById('display');
+  const startBtn         = document.getElementById('startBtn');
+  const finishBtn        = document.getElementById('finishBtn');
+  const modeEl           = document.getElementById('mode');
+  const timerCard        = document.getElementById('timerCard');
+  const settingsToggle   = document.getElementById('settingsToggle');
+  const settingsPanel    = document.getElementById('settingsPanel');
+  const focusMinInput    = document.getElementById('focusMin');
+  const breakMinInput    = document.getElementById('breakMin');
+  const longBreakMinInput= document.getElementById('longBreakMin');
+  const applyBtn         = document.getElementById('applySettings');
 
   function format(s) {
     return `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
@@ -687,11 +706,13 @@
     updateFavicon();
   }
 
-  function switchToBreak() {
+  function switchToBreak(long = false) {
     isBreak = true;
-    remaining = BREAK_SECS;
-    modeEl.textContent = 'Break';
-    timerCard.classList.add('break-mode');
+    isLongBreak = long;
+    remaining = long ? LONG_BREAK_SECS : BREAK_SECS;
+    modeEl.textContent = long ? 'Long Break' : 'Break';
+    timerCard.classList.remove('long-break-mode');
+    timerCard.classList.add(long ? 'long-break-mode' : 'break-mode');
     renderTimer();
     renderSessionBar();
     saveState();
@@ -700,10 +721,11 @@
 
   function switchToFocus() {
     isBreak = false;
+    isLongBreak = false;
     sessionElapsed = 0;
     remaining = FOCUS_SECS;
     modeEl.textContent = 'Focus';
-    timerCard.classList.remove('break-mode');
+    timerCard.classList.remove('break-mode', 'long-break-mode');
     renderTimer();
     renderSessionBar();
     updateFavicon();
@@ -716,16 +738,23 @@
     totalPomodoros++;
     updateStreak();
     sessionElapsed = 0;
-    modeEl.textContent = 'Break starting…';
+    const long = totalPomodoros % 4 === 0;
+    modeEl.textContent = long ? 'Long break starting…' : 'Break starting…';
+    sendNotification(
+      long ? '🎉 4 Pomodoros done! Long break time.' : '✅ Pomodoro complete!',
+      long ? 'Take a well-earned long break.' : 'Take a short break — you earned it.'
+    );
     saveState();
-    setTimeout(switchToBreak, 1500);
+    setTimeout(() => switchToBreak(long), 1500);
   }
 
   function onBreakComplete() {
     playAlarm();
     pomodoroCount++;
+    const wasLong = isLongBreak;
     modeEl.textContent = 'Break done!';
-    timerCard.classList.remove('break-mode');
+    timerCard.classList.remove('break-mode', 'long-break-mode');
+    sendNotification('⏱ Break over!', "Time to focus. You've got this.");
     saveState();
     setTimeout(switchToFocus, 1500);
   }
@@ -744,14 +773,40 @@
   // ── Settings ─────────────────────────────────────────────
   settingsToggle.addEventListener('click', () => settingsPanel.classList.toggle('open'));
 
+  document.getElementById('testNotifBtn').addEventListener('click', () => {
+    const btn = document.getElementById('testNotifBtn');
+    const perm = Notification.permission;
+    if (perm === 'granted') {
+      sendNotification('🔔 Test', 'Komodoro notifications are working!');
+      btn.textContent = '✅ Notification sent!';
+      setTimeout(() => { btn.textContent = '🔔 Test notification'; }, 2500);
+    } else if (perm === 'denied') {
+      btn.textContent = '🚫 Blocked in browser settings';
+      setTimeout(() => { btn.textContent = '🔔 Test notification'; }, 3000);
+    } else {
+      Notification.requestPermission().then(p => {
+        if (p === 'granted') {
+          sendNotification('🔔 Test', 'Komodoro notifications are working!');
+          btn.textContent = '✅ Notification sent!';
+        } else {
+          btn.textContent = '🚫 Permission denied';
+        }
+        setTimeout(() => { btn.textContent = '🔔 Test notification'; }, 3000);
+      });
+    }
+  });
+
   applyBtn.addEventListener('click', () => {
     const fm = parseInt(focusMinInput.value, 10);
     const bm = parseInt(breakMinInput.value, 10);
-    if (!fm || fm < 1 || !bm || bm < 1) return;
-    FOCUS_SECS = fm * 60;
-    BREAK_SECS = bm * 60;
+    const lm = parseInt(longBreakMinInput.value, 10);
+    if (!fm || fm < 1 || !bm || bm < 1 || !lm || lm < 1) return;
+    FOCUS_SECS      = fm * 60;
+    BREAK_SECS      = bm * 60;
+    LONG_BREAK_SECS = lm * 60;
     if (!running) {
-      remaining = isBreak ? BREAK_SECS : FOCUS_SECS;
+      if (isLongBreak) remaining = LONG_BREAK_SECS;
+      else remaining = isBreak ? BREAK_SECS : FOCUS_SECS;
       renderTimer();
     }
     settingsPanel.classList.remove('open');
@@ -770,8 +825,9 @@
     if (!s) return;
 
     // Settings
-    if (s.focusSecs > 0) { FOCUS_SECS = s.focusSecs; focusMinInput.value = FOCUS_SECS / 60; }
-    if (s.breakSecs > 0) { BREAK_SECS = s.breakSecs; breakMinInput.value = BREAK_SECS / 60; }
+    if (s.focusSecs > 0)     { FOCUS_SECS      = s.focusSecs;      focusMinInput.value     = FOCUS_SECS / 60; }
+    if (s.breakSecs > 0)     { BREAK_SECS      = s.breakSecs;      breakMinInput.value     = BREAK_SECS / 60; }
+    if (s.longBreakSecs > 0) { LONG_BREAK_SECS = s.longBreakSecs;  longBreakMinInput.value = LONG_BREAK_SECS / 60; }
     if (s.ringtone && RINGTONES[s.ringtone]) {
       selectedRingtone = s.ringtone;
       document.querySelectorAll('.ringtone-btn').forEach(b =>
@@ -788,9 +844,13 @@
     if (Array.isArray(s.tasks)) { tasks = s.tasks; nextId = s.nextId ?? nextId; }
 
     // Timer mode
-    isBreak        = s.isBreak ?? false;
+    isBreak        = s.isBreak     ?? false;
+    isLongBreak    = s.isLongBreak ?? false;
     sessionElapsed = s.sessionElapsed ?? 0;
-    if (isBreak) { timerCard.classList.add('break-mode'); modeEl.textContent = 'Break'; }
+    if (isBreak) {
+      timerCard.classList.add(isLongBreak ? 'long-break-mode' : 'break-mode');
+      modeEl.textContent = isLongBreak ? 'Long Break' : 'Break';
+    }
 
     // Restore countdown
     if (s.endTimestamp) {
